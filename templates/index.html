@@ -44,14 +44,27 @@
     {% endfor %}
   {% endwith %}
 
-  <section class="panel">
-    <form action="{{ url_for('process_download') }}" method="post">
-      <label for="url">Tautan TikTok</label>
-      <input id="url" name="url" type="url" placeholder="https://www.tiktok.com/@akun/video/..." value="{{ submitted_url or '' }}" required>
-      <button type="submit">Proses & Simpan ke Backblaze B2</button>
-      <p class="note">Gunakan hanya konten milikmu atau yang kamu punya izin untuk mengunduh. Tautan privat, login-required, atau yang tidak didukung mungkin gagal diproses.</p>
-    </form>
-  </section>
+<section class="panel">
+  <form action="{{ url_for('process_download') }}" method="post">
+    <label for="url">Tautan TikTok</label>
+
+    <input
+      id="url"
+      name="url"
+      type="url"
+      placeholder="https://www.tiktok.com/@akun/video/... atau /photo/..."
+      value="{{ submitted_url or '' }}"
+      required
+    >
+
+    <button type="submit">Proses & Simpan ke Backblaze B2</button>
+
+    <p class="note">
+      Gunakan hanya konten milikmu atau yang kamu punya izin untuk mengunduh.
+      Tautan privat, login-required, atau yang tidak didukung mungkin gagal diproses.
+    </p>
+  </form>
+</section>
 
   {% if files %}
   <section class="panel">

@@ -1,40 +1,27 @@
 
 """
-============================================================
 TikTok Media Downloader + Backblaze B2 Object Storage
-============================================================
 
-Deskripsi:
-    Aplikasi web berbasis Flask untuk:
-    1. Menerima URL TikTok dari pengguna.
-    2. Memvalidasi URL agar hanya domain TikTok yang didukung.
-    3. Mengunduh media menggunakan yt-dlp.
-    4. Mengunggah media ke Backblaze B2 melalui S3 API.
-    5. Menyediakan endpoint untuk mengunduh media ke laptop.
-
-Teknologi:
-    - Flask       : web framework
-    - yt-dlp      : pengunduhan media yang didukung
-    - boto3       : komunikasi dengan Backblaze B2 melalui S3 API
-    - python-dotenv: membaca konfigurasi dari file .env
+Fitur:
+- Download video TikTok menggunakan yt-dlp.
+- Download foto TikTok Photo Mode menggunakan gallery-dl.
+- Upload hasil download ke Backblaze B2 melalui S3 API.
+- Download file dari penyimpanan lokal.
+- Download ulang file dari Backblaze B2.
 
 Catatan:
-    - File .env berisi kredensial rahasia dan tidak boleh diunggah
-      ke repositori publik.
-    - Aplikasi ini dirancang untuk penggunaan lokal.
-    - JOBS disimpan di memori, sehingga indeks pekerjaan hilang
-      ketika aplikasi dimulai ulang.
-============================================================
+- Kredensial disimpan di .env.
+- JOBS disimpan di memori dan akan hilang saat server restart.
+- Aplikasi ditujukan untuk penggunaan lokal.
 """
-
-# ============================================================
-# 1. IMPORT LIBRARY
-# ============================================================
 
 import os
 import re
+import sys
 import uuid
 import tempfile
+import mimetypes
+import subprocess
 
 from pathlib import Path
 from urllib.parse import urlparse
@@ -58,50 +45,27 @@ from flask import (
 
 
 # ============================================================
-# 2. MEMUAT KONFIGURASI ENVIRONMENT
+# 1. KONFIGURASI
 # ============================================================
 
-# Membaca variabel dari file .env pada direktori kerja aplikasi.
-# File .env sebaiknya berada satu folder dengan app.py.
 load_dotenv()
 
-# Membuat objek aplikasi Flask.
 app = Flask(__name__)
-
-# Secret key digunakan Flask untuk menandatangani session dan flash message.
-# Untuk penggunaan publik, wajib menggunakan secret acak dari environment.
 app.secret_key = os.getenv(
     "FLASK_SECRET_KEY",
     "change-this-local-dev-secret",
 )
 
-
-# ============================================================
-# 3. KONFIGURASI BACKBLAZE B2
-# ============================================================
-
-# Semua kredensial dibaca dari environment, bukan ditulis langsung
-# di dalam kode program.
 KEY_ID = os.getenv("B2_KEY_ID")
 APPLICATION_KEY = os.getenv("B2_APPLICATION_KEY")
 BUCKET_NAME = os.getenv("B2_BUCKET_NAME")
 ENDPOINT = os.getenv("B2_ENDPOINT")
 REGION = os.getenv("B2_REGION")
 
-
-# ============================================================
-# 4. KONFIGURASI BATAS PENGGUNAAN
-# ============================================================
-
-# Jumlah maksimal file media yang diperbolehkan dalam satu pekerjaan.
 MAX_FILES_PER_JOB = 20
-
-# Ukuran maksimal satu file media, dalam megabyte.
 MAX_FILE_SIZE_MB = 100
+MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024
 
-# Domain yang diperbolehkan untuk mencegah URL menuju host sembarang.
-# Validasi ini membatasi host URL, tetapi bukan pengganti seluruh
-# perlindungan keamanan jaringan.
 ALLOWED_HOSTS = {
     "tiktok.com",
     "www.tiktok.com",
@@ -110,57 +74,23 @@ ALLOWED_HOSTS = {
     "vt.tiktok.com",
 }
 
+VIDEO_EXTENSIONS = {
+    ".mp4", ".webm", ".mov", ".mkv", ".m4v",
+}
 
-# ============================================================
-# 5. PENYIMPANAN INFORMASI PEKERJAAN
-# ============================================================
+PHOTO_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp", ".gif",
+}
 
-# JOBS menyimpan metadata pekerjaan selama proses Flask berjalan.
-#
-# Bentuk umum:
-# {
-#     "job_id": {
-#         "dir": "direktori sementara",
-#         "files": [
-#             {
-#                 "name": "nama file",
-#                 "key": "object key Backblaze",
-#                 "size": ukuran file,
-#                 "download_url": "URL unduhan"
-#             }
-#         ]
-#     }
-# }
-#
-# Keterbatasan:
-# - Data hilang saat aplikasi restart.
-# - Data tidak otomatis dibagikan antarbeberapa worker.
-# - File sementara dapat hilang atau memenuhi disk.
-#
-# Untuk aplikasi produksi, pertimbangkan database dan pembersihan file.
+# Metadata pekerjaan disimpan sementara di memori.
 JOBS = {}
 
 
 # ============================================================
-# 6. MEMBUAT KONEKSI KE BACKBLAZE B2
+# 2. KONEKSI BACKBLAZE B2
 # ============================================================
 
 def get_s3_client():
-    """
-    Membuat klien boto3 untuk mengakses Backblaze B2 melalui S3 API.
-
-    Returns:
-        Klien boto3 S3.
-
-    Raises:
-        RuntimeError: jika konfigurasi wajib belum tersedia.
-
-    Penting:
-        B2_ENDPOINT harus berupa endpoint lengkap, misalnya:
-        https://s3.us-east-005.backblazeb2.com
-    """
-
-    # Pastikan seluruh konfigurasi wajib tersedia sebelum koneksi dibuat.
     required = [
         KEY_ID,
         APPLICATION_KEY,
@@ -171,12 +101,10 @@ def get_s3_client():
 
     if not all(required):
         raise RuntimeError(
-            "Konfigurasi Backblaze belum lengkap. Periksa B2_KEY_ID, "
-            "B2_APPLICATION_KEY, B2_BUCKET_NAME, B2_ENDPOINT, "
-            "dan B2_REGION di .env."
+            "Konfigurasi Backblaze belum lengkap. "
+            "Periksa kembali file .env."
         )
 
-    # Membuat klien S3 dengan kredensial dan endpoint Backblaze.
     return boto3.client(
         "s3",
         endpoint_url=ENDPOINT,
@@ -187,340 +115,233 @@ def get_s3_client():
 
 
 # ============================================================
-# 7. VALIDASI URL TIKTOK
+# 3. VALIDASI URL TIKTOK
 # ============================================================
 
 def validate_tiktok_url(raw_url):
-    """
-    Memvalidasi URL sebelum diteruskan ke yt-dlp.
-
-    Pemeriksaan:
-        - URL tidak boleh kosong.
-        - Skema harus http atau https.
-        - Host harus ada dalam ALLOWED_HOSTS.
-        - URL tidak boleh memuat username atau password.
-
-    Args:
-        raw_url: URL dari formulir pengguna.
-
-    Returns:
-        URL yang sudah dibersihkan dari spasi di awal dan akhir.
-
-    Raises:
-        ValueError: jika URL tidak memenuhi aturan.
-    """
-
-    # Menghapus spasi di awal dan akhir.
     raw_url = (raw_url or "").strip()
 
     if not raw_url:
         raise ValueError("Masukkan URL TikTok terlebih dahulu.")
 
-    # Memisahkan URL menjadi skema, host, path, dan komponen lain.
     parsed = urlparse(raw_url)
     hostname = (parsed.hostname or "").lower()
 
-    # Memastikan skema URL aman dan didukung.
     if parsed.scheme not in ("http", "https"):
         raise ValueError("URL harus menggunakan http atau https.")
 
-    # Hanya menerima domain TikTok yang sudah ditentukan.
     if hostname not in ALLOWED_HOSTS:
         raise ValueError("Gunakan URL dari domain TikTok yang didukung.")
 
-    # Menolak URL dengan kredensial yang disisipkan.
     if parsed.username or parsed.password:
         raise ValueError("URL tidak boleh berisi kredensial.")
 
     return raw_url
 
 
-# ============================================================
-# 8. SANITASI NAMA FILE
-# ============================================================
-
-def safe_filename(path):
+def detect_media_type(url):
     """
-    Membersihkan nama file agar lebih aman digunakan sebagai nama
-    file lokal maupun object key di Backblaze.
-
-    Karakter selain huruf, angka, titik, kurung, spasi, garis bawah,
-    dan tanda hubung akan diganti dengan garis bawah.
-
-    Args:
-        path: objek Path atau lokasi file.
-
-    Returns:
-        Nama file yang sudah dibersihkan.
+    Menentukan jenis konten berdasarkan pola URL TikTok.
+    URL /photo/ menggunakan gallery-dl.
+    URL lainnya menggunakan yt-dlp.
     """
 
-    # Mengambil nama file tanpa direktori induknya.
-    name = Path(path).name
+    path = urlparse(url).path.lower()
 
-    # Mengganti karakter yang tidak diperbolehkan.
-    name = re.sub(r"[^A-Za-z0-9._() -]", "_", name).strip(" .")
+    if "/photo/" in path:
+        return "photo"
 
-    # Membatasi panjang nama dan memberikan nama default jika kosong.
+    return "video"
+
+
+# ============================================================
+# 4. SANITASI NAMA FILE
+# ============================================================
+
+def safe_filename(filename):
+    name = Path(filename).name
+
+    name = re.sub(
+        r"[^A-Za-z0-9._() -]",
+        "_",
+        name,
+    ).strip(" .")
+
     return name[:150] or "media-file"
 
 
-# ============================================================
-# 9. MEMERIKSA JENIS FILE MEDIA
-# ============================================================
-
-def is_media_file(path):
+def flatten_files(files, output_dir):
     """
-    Memastikan sebuah path menunjuk ke file media yang didukung.
-
-    File sementara dan file metadata seperti .part, .json, atau
-    subtitle tidak akan dimasukkan ke daftar hasil unduhan.
-
-    Args:
-        path: objek Path yang akan diperiksa.
-
-    Returns:
-        True jika merupakan file media yang diizinkan, selain itu False.
+    Memindahkan hasil unduhan dari subfolder gallery-dl
+    ke satu folder utama agar route download lokal tetap
+    dapat menemukan semua file.
     """
 
-    # Abaikan folder dan path yang bukan file.
-    if not path.is_file():
-        return False
+    flattened = []
 
-    # Abaikan file sementara dan metadata.
-    ignored_extensions = {
-        ".part",
-        ".ytdl",
-        ".json",
-        ".description",
-        ".vtt",
-        ".srt",
-        ".ass",
-        ".lrc",
-    }
+    for source in files:
+        name = safe_filename(source.name)
+        destination = output_dir / name
 
-    if path.suffix.lower() in ignored_extensions:
-        return False
+        # Menghindari nama file yang sama.
+        counter = 2
 
-    # Ekstensi media yang diterima aplikasi.
-    allowed_extensions = {
-        ".mp4",
-        ".webm",
-        ".mov",
-        ".mkv",
-        ".m4v",
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".webp",
-        ".gif",
-        ".mp3",
-        ".m4a",
-        ".wav",
-        ".opus",
-    }
+        while destination.exists() and destination != source:
+            stem = Path(name).stem
+            suffix = Path(name).suffix
 
-    return path.suffix.lower() in allowed_extensions
+            destination = output_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+
+        if source != destination:
+            source.rename(destination)
+
+        flattened.append(destination)
+
+    return flattened
 
 
 # ============================================================
-# 10. MENGUNDUH MEDIA DENGAN yt-dlp
+# 5. VALIDASI FILE HASIL DOWNLOAD
 # ============================================================
 
-<<<<<<< HEAD
-
-def download_tiktok(url, output_dir):
-    """
-    Mengunduh media TikTok menggunakan yt-dlp dengan dukungan
-    curl_cffi untuk impersonation browser.
-    """
-
-=======
-def download_tiktok(url, output_dir):
-    """
-    Mengunduh media dari URL TikTok yang didukung menggunakan yt-dlp.
-
-    Args:
-        url: URL TikTok yang sudah divalidasi.
-        output_dir: direktori sementara tempat file disimpan.
-
-    Returns:
-        Daftar objek Path untuk file media yang berhasil diunduh.
-
-    Raises:
-        RuntimeError: jika tidak ada file yang dihasilkan atau batas
-                      jumlah/ukuran file terlampaui.
-        yt_dlp.utils.DownloadError: jika proses unduh gagal.
-    """
-
-    # Pola nama file:
-    # judul-media-ID.extensi
-    #
-    # ID membantu membedakan media dengan judul yang sama.
->>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
-    output_template = str(
-        output_dir / "%(title).80s-%(id)s.%(ext)s"
-    )
-
-<<<<<<< HEAD
-    options = {
-        # Lokasi dan format nama file.
-        "outtmpl": output_template,
-
-        
-
-        # Jangan mengunduh playlist.
-        "noplaylist": True,
-
-        # Batas ukuran file.
-        "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
-
-        # Pengaturan output.
-        "quiet": True,
-        "no_warnings": True,
-        "ignoreerrors": False,
-
-        # Tidak menyimpan file tambahan.
-        "writethumbnail": False,
-        "writeinfojson": False,
-
-        # Nama file lebih aman untuk sistem operasi.
-        "restrictfilenames": True,
-
-        # Pengaturan jaringan.
-        "retries": 3,
-        "socket_timeout": 30,
-
-        # Jangan mengatur user_agent secara manual.
-        # curl_cffi akan menangani fingerprint browser.
-    }
-
-    with yt_dlp.YoutubeDL(options) as ydl:
-        ydl.download([url])
-
-    # Mengumpulkan file media yang berhasil dibuat.
-=======
-    # Opsi pengunduhan yt-dlp.
-    options = {
-        # Lokasi dan format nama output.
-        "outtmpl": output_template,
-
-        # Menghindari pengunduhan playlist jika tidak diperlukan.
-        "noplaylist": True,
-
-        # Batas ukuran file yang diterapkan yt-dlp.
-        "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
-
-        # Mengurangi output terminal.
-        "quiet": True,
-        "no_warnings": True,
-
-        # Gagalkan proses jika unduhan tidak berhasil.
-        "ignoreerrors": False,
-
-        # Tidak menyimpan thumbnail dan metadata JSON terpisah.
-        "writethumbnail": False,
-        "writeinfojson": False,
-
-        # Membatasi karakter pada nama file.
-        "restrictfilenames": True,
-
-        # Jumlah percobaan ulang ketika terjadi kegagalan.
-        "retries": 2,
-
-        # Batas waktu socket jaringan dalam detik.
-        "socket_timeout": 20,
-
-        # User-Agent browser untuk permintaan HTTP.
-        # Ini bukan jaminan bahwa TikTok akan menerima permintaan.
-        "user_agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/140.0.0.0 Safari/537.36"
-        ),
-    }
-
-    # Menjalankan proses pengunduhan.
-    with yt_dlp.YoutubeDL(options) as ydl:
-        ydl.download([url])
-
-    # Mengumpulkan file media yang benar-benar dihasilkan.
->>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
-    results = [
-        path
-        for path in output_dir.iterdir()
-        if is_media_file(path)
-    ]
-
-<<<<<<< HEAD
-    if not results:
+def validate_downloaded_files(files):
+    if not files:
         raise RuntimeError(
-            "Tidak ada file media yang berhasil dibuat. "
-            "Tautan mungkin tidak didukung atau konten tidak dapat diakses."
+            "Tidak ada file media yang berhasil diunduh."
         )
 
-=======
-    # Jika tidak ada media, kembalikan error yang mudah dipahami.
-    if not results:
-        raise RuntimeError(
-            "Tidak ada file media yang berhasil dibuat. "
-            "Tautan mungkin tidak didukung, konten mungkin privat, "
-            "atau TikTok mengubah dukungannya."
-        )
-
-    # Memastikan jumlah file tidak melampaui batas aplikasi.
->>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
-    if len(results) > MAX_FILES_PER_JOB:
+    if len(files) > MAX_FILES_PER_JOB:
         raise RuntimeError(
             f"Jumlah file melebihi batas "
             f"{MAX_FILES_PER_JOB} file per proses."
         )
 
-<<<<<<< HEAD
-    # Memeriksa ukuran aktual file.
-    max_size = MAX_FILE_SIZE_MB * 1024 * 1024
-
-    for path in results:
-        if path.stat().st_size > max_size:
-=======
-    # Memeriksa ukuran aktual setiap file setelah diunduh.
-    for path in results:
-        file_size = path.stat().st_size
-        max_size = MAX_FILE_SIZE_MB * 1024 * 1024
-
-        if file_size > max_size:
->>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
+    for path in files:
+        if path.stat().st_size > MAX_FILE_SIZE:
             raise RuntimeError(
                 f"File {path.name} melebihi batas "
                 f"{MAX_FILE_SIZE_MB} MB."
             )
 
-    return results
+    return files
 
-<<<<<<< HEAD
-=======
 
->>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
 # ============================================================
-# 11. MENENTUKAN CONTENT TYPE FILE
+# 6. DOWNLOAD VIDEO DENGAN yt-dlp
+# ============================================================
+
+def download_tiktok_video(url, output_dir):
+    output_template = str(
+        output_dir / "%(title).80s-%(id)s.%(ext)s"
+    )
+
+    options = {
+        "outtmpl": output_template,
+        "noplaylist": True,
+        "max_filesize": MAX_FILE_SIZE,
+        "quiet": True,
+        "no_warnings": True,
+        "ignoreerrors": False,
+        "writethumbnail": False,
+        "writeinfojson": False,
+        "restrictfilenames": True,
+        "retries": 3,
+        "socket_timeout": 30,
+    }
+
+    with yt_dlp.YoutubeDL(options) as downloader:
+        downloader.download([url])
+
+    files = [
+        path
+        for path in output_dir.iterdir()
+        if path.is_file()
+        and path.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+
+    files = flatten_files(files, output_dir)
+
+    return validate_downloaded_files(files)
+
+
+# ============================================================
+# 7. DOWNLOAD FOTO DENGAN gallery-dl
+# ============================================================
+
+def download_tiktok_photo(url, output_dir):
+    """
+    gallery-dl dapat menghasilkan beberapa foto sekaligus.
+    Hasilnya dapat tersimpan dalam struktur subfolder.
+
+    Hanya file gambar yang diproses. Audio MP3 pendamping
+    Photo Mode sengaja tidak ikut diunggah.
+    """
+
+    command = [
+        sys.executable,
+        "-m",
+        "gallery_dl",
+        url,
+    ]
+
+    result = subprocess.run(
+        command,
+        cwd=str(output_dir),
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or "gallery-dl gagal memproses URL."
+        )
+
+        raise RuntimeError(
+            f"Gagal mengunduh foto TikTok: {detail[-1000:]}"
+        )
+
+    # Cari semua gambar, termasuk yang berada di subfolder.
+    image_files = [
+        path
+        for path in output_dir.rglob("*")
+        if path.is_file()
+        and path.suffix.lower() in PHOTO_EXTENSIONS
+    ]
+
+    # Pindahkan foto ke folder utama.
+    image_files = flatten_files(image_files, output_dir)
+
+    return validate_downloaded_files(image_files)
+
+
+# ============================================================
+# 8. FUNGSI DOWNLOAD UTAMA
+# ============================================================
+
+def download_tiktok(url, output_dir):
+    media_type = detect_media_type(url)
+
+    app.logger.info(
+        "Memproses konten TikTok dengan tipe: %s",
+        media_type,
+    )
+
+    if media_type == "photo":
+        return download_tiktok_photo(url, output_dir)
+
+    return download_tiktok_video(url, output_dir)
+
+
+# ============================================================
+# 9. CONTENT TYPE
 # ============================================================
 
 def content_type_for(path):
-    """
-    Menentukan MIME type berdasarkan ekstensi file.
-
-    MIME type disimpan bersama metadata objek di Backblaze agar
-    file lebih mudah dikenali ketika diakses atau diunduh.
-
-    Args:
-        path: objek Path file.
-
-    Returns:
-        String MIME type, atau application/octet-stream jika
-        jenis file tidak dikenali.
-    """
-
-    import mimetypes
-
     return (
         mimetypes.guess_type(path.name)[0]
         or "application/octet-stream"
@@ -528,67 +349,24 @@ def content_type_for(path):
 
 
 # ============================================================
-# 12. MENGUNGGAH FILE KE BACKBLAZE B2
+# 10. UPLOAD KE BACKBLAZE B2
 # ============================================================
 
-<<<<<<< HEAD
-
 def upload_to_b2(files, job_id):
-    """
-    Mengunggah file media ke Backblaze B2.
-    """
-
     s3 = get_s3_client()
     uploaded = []
 
     for path in files:
-        # Membersihkan nama file.
-        name = safe_filename(path)
-
-        # Menyamakan nama file fisik dengan nama yang digunakan aplikasi.
+        name = safe_filename(path.name)
         safe_path = path.with_name(name)
 
         if safe_path != path:
             path = path.rename(safe_path)
 
-        # Object key di Backblaze B2.
-        object_key = f"tiktok-downloads/{job_id}/{name}"
+        object_key = (
+            f"tiktok-downloads/{job_id}/{name}"
+        )
 
-        # Upload ke Backblaze B2.
-=======
-def upload_to_b2(files, job_id):
-    """
-    Mengunggah daftar file media ke bucket Backblaze B2.
-
-    Setiap file disimpan dengan pola object key:
-        tiktok-downloads/{job_id}/{nama-file}
-
-    Args:
-        files: daftar objek Path media lokal.
-        job_id: ID unik untuk satu pekerjaan unduhan.
-
-    Returns:
-        Daftar metadata file yang berhasil diunggah.
-
-    Raises:
-        ClientError: jika operasi upload melalui S3 API gagal.
-    """
-
-    # Membuat klien koneksi ke Backblaze.
-    s3 = get_s3_client()
-
-    uploaded = []
-
-    # Mengunggah file satu per satu.
-    for path in files:
-        # Bersihkan nama file sebelum digunakan sebagai object key.
-        name = safe_filename(path)
-
-        # Setiap pekerjaan mempunyai prefix folder berbeda.
-        object_key = f"tiktok-downloads/{job_id}/{name}"
-
-        # Mengirim file lokal ke bucket Backblaze.
->>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
         s3.upload_file(
             str(path),
             BUCKET_NAME,
@@ -598,89 +376,59 @@ def upload_to_b2(files, job_id):
             },
         )
 
-<<<<<<< HEAD
         uploaded.append({
             "name": name,
             "key": object_key,
             "size": path.stat().st_size,
         })
-=======
-        # Menyimpan metadata untuk dipakai oleh route unduhan.
-        uploaded.append(
-            {
-                "name": name,
-                "key": object_key,
-                "size": path.stat().st_size,
-            }
-        )
->>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
 
     return uploaded
 
 
 # ============================================================
-# 13. ROUTE HALAMAN UTAMA
+# 11. HALAMAN UTAMA
 # ============================================================
 
 @app.get("/")
 def index():
-    """
-    Menampilkan halaman utama aplikasi.
-
-    Template:
-        templates/index.html
-    """
-
     return render_template("index.html")
 
 
 # ============================================================
-# 14. ROUTE PEMROSESAN UNDUHAN
+# 12. PROSES DOWNLOAD DAN UPLOAD
 # ============================================================
 
 @app.post("/download")
 def process_download():
-    """
-    Memproses formulir URL TikTok.
-
-    Alur:
-        1. Membaca URL dari formulir.
-        2. Memvalidasi URL.
-        3. Membuat ID pekerjaan dan direktori sementara.
-        4. Mengunduh media.
-        5. Mengunggah media ke Backblaze B2.
-        6. Menyimpan metadata ke JOBS.
-        7. Menampilkan hasil pada halaman utama.
-
-    Catatan:
-        Proses download dan upload berjalan secara sinkron.
-        Untuk file besar atau penggunaan publik, pertimbangkan
-        background worker dan pembatasan request.
-    """
-
-    # Mengambil nilai dari input formulir bernama "url".
     url = request.form.get("url", "")
 
     try:
-        # Pastikan URL berasal dari domain yang didukung.
+        # Validasi URL.
         url = validate_tiktok_url(url)
 
-        # Membuat ID acak untuk membedakan setiap pekerjaan.
+        # Membuat ID pekerjaan.
         job_id = uuid.uuid4().hex
 
-        # Membuat direktori sementara khusus pekerjaan ini.
+        # Membuat direktori sementara.
         work_dir = Path(
-            tempfile.mkdtemp(prefix=f"tiktok_{job_id}_")
+            tempfile.mkdtemp(
+                prefix=f"tiktok_{job_id}_"
+            )
         )
 
-        # Tahap 1: mengunduh media ke direktori sementara.
-        media_files = download_tiktok(url, work_dir)
+        # Tahap 1: download video atau foto.
+        media_files = download_tiktok(
+            url,
+            work_dir,
+        )
 
-        # Tahap 2: mengunggah media ke Backblaze B2.
-        uploaded = upload_to_b2(media_files, job_id)
+        # Tahap 2: upload ke Backblaze B2.
+        uploaded = upload_to_b2(
+            media_files,
+            job_id,
+        )
 
-        # Menyimpan indeks pekerjaan di memori.
-        # Indeks ini diperlukan oleh endpoint unduhan.
+        # Tahap 3: simpan informasi pekerjaan.
         JOBS[job_id] = {
             "dir": str(work_dir),
             "files": [
@@ -698,14 +446,21 @@ def process_download():
             ],
         }
 
-        # Pesan sukses ditampilkan di halaman hasil.
-        flash(
-            "Berhasil! Media sudah diunggah ke Backblaze B2 "
-            "dan siap diunduh ke laptop.",
-            "success",
-        )
+        media_type = detect_media_type(url)
 
-        # Render halaman yang sama dengan data hasil unduhan.
+        if media_type == "photo":
+            success_message = (
+                f"Berhasil! {len(uploaded)} foto telah "
+                "diunggah ke Backblaze B2."
+            )
+        else:
+            success_message = (
+                "Berhasil! Video telah diunggah "
+                "ke Backblaze B2."
+            )
+
+        flash(success_message, "success")
+
         return render_template(
             "index.html",
             files=JOBS[job_id]["files"],
@@ -713,40 +468,38 @@ def process_download():
             submitted_url=url,
         )
 
-    # Kesalahan validasi input.
     except ValueError as exc:
         flash(str(exc), "error")
 
-    # Kesalahan saat yt-dlp mengunduh media.
     except yt_dlp.utils.DownloadError:
         flash(
-            "Media gagal diambil. Pastikan URL benar dan konten "
-            "dapat diakses secara sah tanpa melewati login "
-            "atau proteksi.",
+            "Video gagal diunduh. Pastikan URL benar "
+            "dan konten dapat diakses.",
             "error",
         )
 
-    # Kesalahan konfigurasi, batas aplikasi, atau penyimpanan.
+    except subprocess.TimeoutExpired:
+        flash(
+            "Proses download melewati batas waktu 5 menit.",
+            "error",
+        )
+
     except (ClientError, RuntimeError) as exc:
-        # Catat jenis error tanpa mencetak kredensial.
         app.logger.warning(
             "Download/storage operation failed: %s",
             type(exc).__name__,
         )
 
-        # RuntimeError berasal dari validasi internal aplikasi.
-        # ClientError berasal dari operasi layanan penyimpanan.
         if isinstance(exc, RuntimeError):
             message = str(exc)
         else:
             message = (
-                "Upload ke Backblaze gagal. Periksa endpoint, "
-                "region, izin key, dan koneksi."
+                "Upload atau akses Backblaze B2 gagal. "
+                "Periksa konfigurasi dan izin Application Key."
             )
 
         flash(message, "error")
 
-    # Menangani kesalahan lain yang tidak diperkirakan.
     except Exception as exc:
         app.logger.exception(
             "Unexpected downloader error: %s",
@@ -754,44 +507,25 @@ def process_download():
         )
 
         flash(
-            "Terjadi kesalahan. Periksa terminal VS Code "
-            "untuk detail teknis. Jangan membagikan kredensial.",
+            "Terjadi kesalahan. Periksa terminal "
+            "untuk detail teknis.",
             "error",
         )
 
-    # Jika terjadi error, kembali ke halaman utama.
     return redirect(url_for("index"))
 
 
 # ============================================================
-# 15. ROUTE MENGUNDUH FILE DARI PENYIMPANAN LOKAL
+# 13. DOWNLOAD DARI PENYIMPANAN LOKAL
 # ============================================================
 
 @app.get("/download-local/<job_id>/<path:filename>")
 def download_local(job_id, filename):
-    """
-    Mengirim file hasil unduhan yang masih tersedia di disk lokal.
-
-    Endpoint ini tidak mengambil file dari Backblaze.
-    File diambil dari direktori sementara pada komputer yang
-    menjalankan aplikasi.
-
-    Args:
-        job_id: ID pekerjaan.
-        filename: nama file yang ingin diunduh.
-
-    Raises:
-        404: jika pekerjaan, metadata file, atau file tidak ditemukan.
-    """
-
-    # Pastikan pekerjaan masih tercatat di memori.
     job = JOBS.get(job_id)
 
     if not job:
         abort(404)
 
-    # Pastikan file tercatat pada daftar hasil pekerjaan.
-    # Ini juga mencegah pengguna meminta file sembarang.
     match = next(
         (
             item
@@ -804,14 +538,11 @@ def download_local(job_id, filename):
     if not match:
         abort(404)
 
-    # Membentuk path file berdasarkan direktori pekerjaan.
     local_path = Path(job["dir"]) / filename
 
-    # Pastikan file benar-benar masih ada.
     if not local_path.is_file():
         abort(404)
 
-    # Mengirim file sebagai lampiran untuk diunduh browser.
     return send_file(
         local_path,
         as_attachment=True,
@@ -820,32 +551,16 @@ def download_local(job_id, filename):
 
 
 # ============================================================
-# 16. ROUTE MENGUNDUH ULANG FILE DARI BACKBLAZE B2
+# 14. DOWNLOAD ULANG DARI BACKBLAZE B2
 # ============================================================
 
 @app.get("/download-from-b2/<job_id>/<path:filename>")
 def download_from_b2(job_id, filename):
-    """
-    Mengambil file yang sebelumnya diunggah ke Backblaze B2,
-    menyimpannya ke direktori sementara, lalu mengirimkannya
-    ke browser sebagai file unduhan.
-
-    Berbeda dari download_local(), route ini membaca ulang objek
-    dari layanan penyimpanan cloud.
-
-    Catatan:
-        Metadata pekerjaan tetap harus tersedia di JOBS.
-        Saat aplikasi restart, route ini tidak dapat menemukan
-        pekerjaan lama tanpa database atau indeks persisten.
-    """
-
-    # Memeriksa keberadaan pekerjaan.
     job = JOBS.get(job_id)
 
     if not job:
         abort(404)
 
-    # Memastikan nama file merupakan bagian dari pekerjaan tersebut.
     item = next(
         (
             file_info
@@ -859,25 +574,22 @@ def download_from_b2(job_id, filename):
         abort(404)
 
     try:
-        # Membuat koneksi ke Backblaze.
         s3 = get_s3_client()
 
-        # Membuat direktori sementara untuk menampung hasil unduhan.
         temp_dir = Path(
-            tempfile.mkdtemp(prefix="b2_restore_")
+            tempfile.mkdtemp(
+                prefix="b2_restore_"
+            )
         )
 
-        # Menentukan lokasi file hasil pengambilan dari B2.
         local_path = temp_dir / item["name"]
 
-        # Mengunduh objek dari bucket ke disk lokal.
         s3.download_file(
             BUCKET_NAME,
             item["key"],
             str(local_path),
         )
 
-        # Mengirim file hasil unduhan ke browser.
         return send_file(
             local_path,
             as_attachment=True,
@@ -885,7 +597,6 @@ def download_from_b2(job_id, filename):
         )
 
     except Exception as exc:
-        # Catat detail error di log server, bukan di halaman pengguna.
         app.logger.warning(
             "B2 download failed: %s",
             type(exc).__name__,
@@ -901,16 +612,8 @@ def download_from_b2(job_id, filename):
 
 
 # ============================================================
-# 17. MENJALANKAN APLIKASI
+# 15. MENJALANKAN APLIKASI
 # ============================================================
 
 if __name__ == "__main__":
-    """
-    Bagian ini dijalankan hanya ketika app.py dieksekusi langsung.
-
-    debug=True membantu pengembangan lokal, tetapi jangan digunakan
-    untuk server publik. Jangan mengekspos server development Flask
-    langsung ke internet.
-    """
-
     app.run(debug=True)
