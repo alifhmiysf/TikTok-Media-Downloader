@@ -326,6 +326,7 @@ def is_media_file(path):
 # 10. MENGUNDUH MEDIA DENGAN yt-dlp
 # ============================================================
 
+<<<<<<< HEAD
 
 def download_tiktok(url, output_dir):
     """
@@ -333,10 +334,34 @@ def download_tiktok(url, output_dir):
     curl_cffi untuk impersonation browser.
     """
 
+=======
+def download_tiktok(url, output_dir):
+    """
+    Mengunduh media dari URL TikTok yang didukung menggunakan yt-dlp.
+
+    Args:
+        url: URL TikTok yang sudah divalidasi.
+        output_dir: direktori sementara tempat file disimpan.
+
+    Returns:
+        Daftar objek Path untuk file media yang berhasil diunduh.
+
+    Raises:
+        RuntimeError: jika tidak ada file yang dihasilkan atau batas
+                      jumlah/ukuran file terlampaui.
+        yt_dlp.utils.DownloadError: jika proses unduh gagal.
+    """
+
+    # Pola nama file:
+    # judul-media-ID.extensi
+    #
+    # ID membantu membedakan media dengan judul yang sama.
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
     output_template = str(
         output_dir / "%(title).80s-%(id)s.%(ext)s"
     )
 
+<<<<<<< HEAD
     options = {
         # Lokasi dan format nama file.
         "outtmpl": output_template,
@@ -373,29 +398,97 @@ def download_tiktok(url, output_dir):
         ydl.download([url])
 
     # Mengumpulkan file media yang berhasil dibuat.
+=======
+    # Opsi pengunduhan yt-dlp.
+    options = {
+        # Lokasi dan format nama output.
+        "outtmpl": output_template,
+
+        # Menghindari pengunduhan playlist jika tidak diperlukan.
+        "noplaylist": True,
+
+        # Batas ukuran file yang diterapkan yt-dlp.
+        "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
+
+        # Mengurangi output terminal.
+        "quiet": True,
+        "no_warnings": True,
+
+        # Gagalkan proses jika unduhan tidak berhasil.
+        "ignoreerrors": False,
+
+        # Tidak menyimpan thumbnail dan metadata JSON terpisah.
+        "writethumbnail": False,
+        "writeinfojson": False,
+
+        # Membatasi karakter pada nama file.
+        "restrictfilenames": True,
+
+        # Jumlah percobaan ulang ketika terjadi kegagalan.
+        "retries": 2,
+
+        # Batas waktu socket jaringan dalam detik.
+        "socket_timeout": 20,
+
+        # User-Agent browser untuk permintaan HTTP.
+        # Ini bukan jaminan bahwa TikTok akan menerima permintaan.
+        "user_agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/140.0.0.0 Safari/537.36"
+        ),
+    }
+
+    # Menjalankan proses pengunduhan.
+    with yt_dlp.YoutubeDL(options) as ydl:
+        ydl.download([url])
+
+    # Mengumpulkan file media yang benar-benar dihasilkan.
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
     results = [
         path
         for path in output_dir.iterdir()
         if is_media_file(path)
     ]
 
+<<<<<<< HEAD
     if not results:
         raise RuntimeError(
             "Tidak ada file media yang berhasil dibuat. "
             "Tautan mungkin tidak didukung atau konten tidak dapat diakses."
         )
 
+=======
+    # Jika tidak ada media, kembalikan error yang mudah dipahami.
+    if not results:
+        raise RuntimeError(
+            "Tidak ada file media yang berhasil dibuat. "
+            "Tautan mungkin tidak didukung, konten mungkin privat, "
+            "atau TikTok mengubah dukungannya."
+        )
+
+    # Memastikan jumlah file tidak melampaui batas aplikasi.
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
     if len(results) > MAX_FILES_PER_JOB:
         raise RuntimeError(
             f"Jumlah file melebihi batas "
             f"{MAX_FILES_PER_JOB} file per proses."
         )
 
+<<<<<<< HEAD
     # Memeriksa ukuran aktual file.
     max_size = MAX_FILE_SIZE_MB * 1024 * 1024
 
     for path in results:
         if path.stat().st_size > max_size:
+=======
+    # Memeriksa ukuran aktual setiap file setelah diunduh.
+    for path in results:
+        file_size = path.stat().st_size
+        max_size = MAX_FILE_SIZE_MB * 1024 * 1024
+
+        if file_size > max_size:
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
             raise RuntimeError(
                 f"File {path.name} melebihi batas "
                 f"{MAX_FILE_SIZE_MB} MB."
@@ -403,6 +496,10 @@ def download_tiktok(url, output_dir):
 
     return results
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
 # ============================================================
 # 11. MENENTUKAN CONTENT TYPE FILE
 # ============================================================
@@ -434,6 +531,7 @@ def content_type_for(path):
 # 12. MENGUNGGAH FILE KE BACKBLAZE B2
 # ============================================================
 
+<<<<<<< HEAD
 
 def upload_to_b2(files, job_id):
     """
@@ -457,6 +555,40 @@ def upload_to_b2(files, job_id):
         object_key = f"tiktok-downloads/{job_id}/{name}"
 
         # Upload ke Backblaze B2.
+=======
+def upload_to_b2(files, job_id):
+    """
+    Mengunggah daftar file media ke bucket Backblaze B2.
+
+    Setiap file disimpan dengan pola object key:
+        tiktok-downloads/{job_id}/{nama-file}
+
+    Args:
+        files: daftar objek Path media lokal.
+        job_id: ID unik untuk satu pekerjaan unduhan.
+
+    Returns:
+        Daftar metadata file yang berhasil diunggah.
+
+    Raises:
+        ClientError: jika operasi upload melalui S3 API gagal.
+    """
+
+    # Membuat klien koneksi ke Backblaze.
+    s3 = get_s3_client()
+
+    uploaded = []
+
+    # Mengunggah file satu per satu.
+    for path in files:
+        # Bersihkan nama file sebelum digunakan sebagai object key.
+        name = safe_filename(path)
+
+        # Setiap pekerjaan mempunyai prefix folder berbeda.
+        object_key = f"tiktok-downloads/{job_id}/{name}"
+
+        # Mengirim file lokal ke bucket Backblaze.
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
         s3.upload_file(
             str(path),
             BUCKET_NAME,
@@ -466,11 +598,22 @@ def upload_to_b2(files, job_id):
             },
         )
 
+<<<<<<< HEAD
         uploaded.append({
             "name": name,
             "key": object_key,
             "size": path.stat().st_size,
         })
+=======
+        # Menyimpan metadata untuk dipakai oleh route unduhan.
+        uploaded.append(
+            {
+                "name": name,
+                "key": object_key,
+                "size": path.stat().st_size,
+            }
+        )
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
 
     return uploaded
 

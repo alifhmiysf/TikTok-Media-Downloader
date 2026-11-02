@@ -1,4 +1,8 @@
 Flask>=3.0,<4.0
 boto3>=1.34
 python-dotenv>=1.0
+<<<<<<< HEAD
 yt-dlp[default,curl-cffi]>=2025.1.15
+=======
+yt-dlp>=2025.1.15
+>>>>>>> c80ffeece7be250c45ae5ce50590e45fc39a563b
